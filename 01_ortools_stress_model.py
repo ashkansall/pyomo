@@ -1,7 +1,7 @@
 import random
 import time
 from pathlib import Path
-
+import plotly.graph_objects as go
 import pandas as pd
 from ortools.sat.python import cp_model
 
@@ -98,6 +98,17 @@ SCENARIOS = [
         "time_limit": 20,
     },
 ]
+
+# for gnatt chart 
+PRODUCT_COLORS = {
+    "P1": "#2563eb", "P2": "#16a34a", "P3": "#dc2626", "P4": "#9333ea",
+    "P5": "#f97316", "P6": "#0891b2", "P7": "#be123c", "P8": "#65a30d",
+}
+
+MACHINE_PATTERNS = {
+    "Cutting": "/", "Drilling": "\\", "Milling": "x",
+    "Welding": ".", "Painting": "+", "Inspection": "-",
+}
 
 
 def generate_orders(num_orders, max_batches, quantity_min, quantity_max, seed=7):
@@ -396,6 +407,211 @@ def short_sheet_name(prefix, name):
     return f"{prefix}_{name}"[:31]
 
 
+
+
+
+# gnatt demostration
+def minute_label(minute):
+    day = minute // SHIFT_LENGTH + 1
+    shift_min = minute % SHIFT_LENGTH
+    hour = 8 + shift_min // 60
+    mins = shift_min % 60
+    return f"Day {day} {hour:02d}:{mins:02d}"
+
+
+def create_ortools_gantt(schedule, condition_df, scenario_name, max_days):
+    if schedule.empty:
+        print(f"No Gantt chart created for {scenario_name}: empty schedule")
+        return
+
+    chart_dir = BASE_DIR / "results" / "charts"
+    chart_dir.mkdir(parents=True, exist_ok=True)
+
+    machine_order = [m for m in MACHINES if m in schedule["machine"].unique()]
+    y_pos = {machine: i for i, machine in enumerate(machine_order)}
+
+    fig = go.Figure()
+
+    # Alternating day background bands
+    for day in range(max_days):
+        x0 = day * SHIFT_LENGTH
+        x1 = (day + 1) * SHIFT_LENGTH
+        fig.add_shape(
+            type="rect",
+            x0=x0,
+            x1=x1,
+            y0=-0.7,
+            y1=len(machine_order) - 0.3,
+            fillcolor="rgba(240,240,240,0.35)" if day % 2 == 0 else "rgba(220,230,255,0.28)",
+            line_width=0,
+            layer="below",
+        )
+        fig.add_vline(
+            x=x0,
+            line_width=1,
+            line_dash="dot",
+            line_color="rgba(70,70,70,0.45)",
+        )
+        fig.add_annotation(
+            x=x0 + SHIFT_LENGTH / 2,
+            y=len(machine_order) - 0.15,
+            text=f"Day {day + 1}",
+            showarrow=False,
+            font=dict(size=11, color="#374151"),
+        )
+
+    # Operation bars
+    used_legend = set()
+    for _, op in schedule.iterrows():
+        product = op["product_id"]
+        machine = op["machine"]
+        show_legend = product not in used_legend
+        used_legend.add(product)
+
+        fig.add_trace(
+            go.Bar(
+                x=[op["duration"]],
+                y=[y_pos[machine]],
+                base=[op["start_min"]],
+                orientation="h",
+                width=0.58,
+                name=product,
+                legendgroup=product,
+                showlegend=show_legend,
+                marker=dict(
+                    color=PRODUCT_COLORS.get(product, "#6b7280"),
+                    line=dict(color="#111827", width=1.2),
+                    pattern=dict(shape=MACHINE_PATTERNS.get(machine, "")),
+                ),
+                text=[f"{op['order_id']}<br>{product}"],
+                textposition="inside",
+                insidetextanchor="middle",
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Product: %{customdata[1]}<br>"
+                    "Batch: %{customdata[2]}<br>"
+                    "Machine: %{customdata[3]}<br>"
+                    "Duration: %{customdata[4]} min<br>"
+                    "Start: %{customdata[5]}<br>"
+                    "End: %{customdata[6]}<extra></extra>"
+                ),
+                customdata=[[
+                    op["order_id"],
+                    product,
+                    op["batch_id"],
+                    machine,
+                    op["duration"],
+                    minute_label(int(op["start_min"])),
+                    minute_label(int(op["end_min"])),
+                ]],
+            )
+        )
+
+    # Fixed planned maintenance windows
+    planned = maintenance_windows(max_days)
+    for machine, windows in planned.items():
+        if machine not in y_pos:
+            continue
+        y = y_pos[machine]
+        for start, duration in windows:
+            fig.add_shape(
+                type="rect",
+                x0=start,
+                x1=start + duration,
+                y0=y - 0.42,
+                y1=y + 0.42,
+                fillcolor="rgba(75,85,99,0.55)",
+                line=dict(color="#111827", width=2, dash="dash"),
+            )
+            fig.add_annotation(
+                x=start + duration / 2,
+                y=y,
+                text="Planned<br>Maint.",
+                showarrow=False,
+                font=dict(size=9, color="white"),
+            )
+
+    # Condition-based maintenance: displayed at end of triggered shift
+    if condition_df is not None and not condition_df.empty:
+        triggered = condition_df[condition_df["maintenance_required"] == 1]
+
+        for _, row in triggered.iterrows():
+            machine = row["machine"]
+            if machine not in y_pos:
+                continue
+
+            day = int(row["day"])
+            reserved = int(row["maintenance_reserved_min"])
+            x1 = day * SHIFT_LENGTH
+            x0 = x1 - reserved
+            y = y_pos[machine]
+
+            fig.add_shape(
+                type="rect",
+                x0=x0,
+                x1=x1,
+                y0=y - 0.47,
+                y1=y + 0.47,
+                fillcolor="rgba(239,68,68,0.55)",
+                line=dict(color="#991b1b", width=2),
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[(x0 + x1) / 2],
+                    y=[y],
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=14, color="#ef4444", line=dict(color="white", width=1)),
+                    name="Condition maintenance",
+                    showlegend=False,
+                    hovertemplate=(
+                        f"<b>Condition-Based Maintenance</b><br>"
+                        f"Machine: {machine}<br>"
+                        f"Day: {day}<br>"
+                        f"Daily usage: {row['daily_usage_min']} min<br>"
+                        f"Reserved: {reserved} min<extra></extra>"
+                    ),
+                )
+            )
+
+    makespan = int(schedule["end_min"].max())
+    fig.add_vline(x=makespan, line_width=3, line_dash="dash", line_color="black")
+    fig.add_annotation(x=makespan, y=-0.55, text=f"Makespan: {makespan} min", showarrow=True)
+
+    tick_step = 240
+    x_ticks = list(range(0, max(makespan + tick_step, max_days * SHIFT_LENGTH + 1), tick_step))
+
+    fig.update_layout(
+        title=f"Detailed OR-Tools Gantt Chart - {scenario_name}",
+        barmode="overlay",
+        height=720,
+        width=1450,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        xaxis=dict(
+            title="Production time",
+            tickvals=x_ticks,
+            ticktext=[minute_label(x) for x in x_ticks],
+            showgrid=True,
+            gridcolor="rgba(180,180,180,0.35)",
+        ),
+        yaxis=dict(
+            title="Machines",
+            tickvals=list(y_pos.values()),
+            ticktext=list(y_pos.keys()),
+            autorange="reversed",
+        ),
+        legend=dict(title="Product ID", orientation="h", y=-0.18),
+        margin=dict(l=110, r=40, t=80, b=120),
+    )
+
+    output_html = chart_dir / f"gantt_{scenario_name}.html"
+    fig.write_html(output_html)
+    print(f"Gantt chart created: {output_html}")
+
+# gnatt demostration END
+
+
 def main():
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -432,6 +648,19 @@ def main():
 
         for name, schedule in schedules.items():
             schedule.to_excel(writer, sheet_name=short_sheet_name("sch", name), index=False)
+            
+        # gnatt demostration code
+           
+        chart_scenario_name = "04_realistic_constraints"
+        chart_scenario = next(s for s in SCENARIOS if s["name"] == chart_scenario_name)
+
+        create_ortools_gantt(
+            schedules[chart_scenario_name],
+            condition_maintenance_results[chart_scenario_name],
+            chart_scenario_name,
+            chart_scenario["max_days"],
+        )
+        # gnatt demostration code END
 
     print(f"\nExcel file created: {OUTPUT_FILE}")
 

@@ -350,3 +350,190 @@ In the larger OR-Tools stress tests, the maintenance rule has a strong effect:
 
 The current results show that OR-Tools CP-SAT is the most suitable solver for this project because it directly supports scheduling constraints and can handle the larger stress scenarios.
 PuLP and Pyomo are useful for explaining the equivalent MILP approach, but they are less convenient for full-scale open shop scheduling.
+
+## 16. Additional Report: Nonlinear Maintenance in PuLP and Pyomo
+
+The condition-based maintenance rule was also added to the PuLP and Pyomo models.
+This makes the comparison stronger because all three libraries now include the same nonlinear industrial idea:
+
+```text
+If daily machine usage is greater than 180 minutes,
+then 30 minutes must be reserved for maintenance.
+```
+
+In real industry, this is a nonlinear or threshold-based rule because the maintenance time suddenly changes when the machine passes a usage limit.
+The relationship is not a smooth linear equation:
+
+```text
+daily usage <= 180 minutes -> maintenance = 0 minutes
+daily usage > 180 minutes  -> maintenance = 30 minutes
+```
+
+However, PuLP and Pyomo solve this project as MILP models.
+MILP solvers need the rule to be written with linear constraints.
+Therefore, the nonlinear maintenance rule is converted into a linear form using a binary variable.
+
+### Maintenance Variable
+
+For each machine and day, the model creates a binary variable:
+
+```text
+maintenance_required[machine, day]
+```
+
+This variable means:
+
+```text
+0 -> maintenance is not required
+1 -> maintenance is required
+```
+
+The model also calculates:
+
+```text
+daily_usage[machine, day]
+```
+
+This is the total processing time assigned to that machine on that day.
+
+### Linearized Maintenance Constraints
+
+The nonlinear condition is represented using big-M constraints:
+
+```text
+daily_usage <= 180 + M x maintenance_required
+daily_usage >= 181 - M x (1 - maintenance_required)
+daily_usage + 30 x maintenance_required <= 480
+```
+
+The meaning is:
+
+| Constraint | Meaning |
+|---|---|
+| `daily_usage <= 180 + M x maintenance_required` | If maintenance is not required, usage must stay at or below 180 minutes |
+| `daily_usage >= 181 - M x (1 - maintenance_required)` | If maintenance is required, usage must be above 180 minutes |
+| `daily_usage + 30 x maintenance_required <= 480` | If maintenance is required, 30 minutes are reserved inside the shift |
+
+This is how a nonlinear industrial rule becomes solvable in PuLP and Pyomo.
+The original rule is nonlinear, but the optimization model uses a linearized version.
+
+### PuLP Implementation
+
+In PuLP, the model creates a variable for daily usage and a binary variable for the maintenance decision:
+
+```python
+daily_usage = pulp.LpVariable(...)
+maintenance_required = pulp.LpVariable(..., cat="Binary")
+```
+
+Then it links daily usage to the operations assigned to that machine and day.
+Finally, it adds the big-M constraints shown above.
+
+The PuLP output workbook includes a sheet called:
+
+```text
+Condition Maintenance
+```
+
+This sheet shows, for each machine and day:
+
+- daily usage
+- maintenance threshold
+- whether maintenance was triggered
+- reserved maintenance time
+
+### Pyomo Implementation
+
+In Pyomo, the same logic is modeled with Pyomo variables and constraints.
+The maintenance trigger is also binary:
+
+```python
+model.condition_maintenance[machine, day]
+```
+
+The daily usage is calculated from the operations assigned to each machine-day.
+Then Pyomo applies the same linearized threshold constraints:
+
+```text
+daily_usage <= 180 + M x maintenance_required
+daily_usage >= 181 - M x (1 - maintenance_required)
+daily_usage + 30 x maintenance_required <= 480
+```
+
+The Pyomo output workbook also includes a sheet called:
+
+```text
+Condition Maintenance
+```
+
+This allows direct comparison with the PuLP output.
+
+### PuLP and Pyomo Maintenance Results
+
+In the current PuLP and Pyomo files, both models solve the same original small case.
+For this case, the maximum daily machine usage is 140 minutes.
+Since 140 is less than the 180-minute threshold, condition-based maintenance is not triggered.
+
+| Solver | Max Daily Usage | Threshold | Maintenance Triggers | Reserved Maintenance |
+|---|---:|---:|---:|---:|
+| PuLP CBC | 140 | 180 | 0 | 0 |
+| Pyomo HiGHS | 140 | 180 | 0 | 0 |
+
+Machine usage in the PuLP and Pyomo same-case result:
+
+| Machine | Daily Usage min | Maintenance Triggered |
+|---|---:|---:|
+| Cutting | 112 | 0 |
+| Drilling | 96 | 0 |
+| Milling | 48 | 0 |
+| Welding | 84 | 0 |
+| Painting | 140 | 0 |
+
+This explains why the same-case makespan remains 168 minutes after adding condition-based maintenance.
+The constraint exists in the model, but it does not become active because no machine is used heavily enough.
+
+### Comparison with OR-Tools
+
+The same maintenance idea is modeled differently in the three solvers:
+
+| Solver | How Maintenance Is Modeled | Practical Effect |
+|---|---|---|
+| OR-Tools CP-SAT | Boolean variables with reified constraints inside a scheduling model | Best for stress testing because it also has interval variables and no-overlap constraints |
+| PuLP CBC | Binary variables and big-M linear constraints | Works for the small case, but becomes larger quickly |
+| Pyomo HiGHS | Binary variables and big-M linear constraints | Clear mathematical formulation, but still not as direct for scheduling |
+
+The main difference is that OR-Tools is a scheduling solver, while PuLP and Pyomo are general mathematical programming tools.
+OR-Tools can represent operations as intervals, but PuLP and Pyomo must represent conflicts using many binary ordering decisions.
+
+### What Changed After Adding Nonlinear Maintenance?
+
+After adding the nonlinear maintenance rule, the model became more realistic because it now checks machine workload before deciding available capacity.
+The model no longer assumes that all 480 shift minutes are always available for production.
+If a machine becomes heavily loaded, the model must reserve maintenance time.
+
+In PuLP and Pyomo, this adds extra binary variables.
+For the same-case model, there are 5 machines and 5 planning days:
+
+```text
+5 machines x 5 days = 25 maintenance trigger variables
+```
+
+This is why PuLP and Pyomo now report 116 binary variables in the same-case result.
+The maintenance rule increases model complexity even when it does not change the final schedule.
+
+In the current same-case result:
+
+- The schedule is unchanged.
+- Makespan stays at 168 minutes.
+- No maintenance is triggered.
+- The model is still more complex because the solver must check the maintenance threshold for every machine-day.
+
+In larger cases, the effect becomes stronger.
+The OR-Tools stress test shows this clearly:
+
+| Scenario | Maintenance Triggers | Reserved Maintenance Minutes |
+|---|---:|---:|
+| `04_realistic_constraints` | 15 | 450 |
+| `05_large_stress` | 31 | 930 |
+
+This means the nonlinear maintenance rule does not always change a small schedule, but it becomes important when the production system is stressed with more orders, more batches, and higher machine utilization.

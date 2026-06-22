@@ -1,11 +1,17 @@
 import time
+import sys
 from pathlib import Path
-
-import pandas as pd
-import pulp
 
 
 BASE_DIR = Path(__file__).resolve().parent
+PACKAGE_DIR = BASE_DIR / ".packages"
+if PACKAGE_DIR.exists():
+    sys.path.insert(0, str(PACKAGE_DIR))
+
+import pulp
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+
 OUTPUT_FILE = BASE_DIR / "results" / "pulp_same_case_results.xlsx"
 
 SHIFT_LENGTH = 8 * 60
@@ -15,11 +21,18 @@ BIG_M = HORIZON
 MAINTENANCE_USAGE_LIMIT = 180
 MAINTENANCE_CONDITION_DURATION = 30
 
-ORDERS = [
+SAME_CASE_ORDERS = [
     {"order_id": "O1", "batch_id": "O1_B1", "product_id": "P1", "quantity": 10},
     {"order_id": "O2", "batch_id": "O2_B1", "product_id": "P2", "quantity": 8},
     {"order_id": "O3", "batch_id": "O3_B1", "product_id": "P1", "quantity": 6},
     {"order_id": "O4", "batch_id": "O4_B1", "product_id": "P3", "quantity": 12},
+]
+
+MAINTENANCE_STRESS_ORDERS = [
+    {"order_id": "S1", "batch_id": "S1_B1", "product_id": "P1", "quantity": 40},
+    {"order_id": "S2", "batch_id": "S2_B1", "product_id": "P2", "quantity": 35},
+    {"order_id": "S3", "batch_id": "S3_B1", "product_id": "P1", "quantity": 30},
+    {"order_id": "S4", "batch_id": "S4_B1", "product_id": "P3", "quantity": 32},
 ]
 
 PRODUCT_MACHINE_TIMES = {
@@ -30,12 +43,34 @@ PRODUCT_MACHINE_TIMES = {
 
 MACHINES = ["Cutting", "Drilling", "Milling", "Welding", "Painting"]
 
-DUE_DATES = {
+SAME_CASE_DUE_DATES = {
     "O1": 480,
     "O2": 480,
     "O3": 960,
     "O4": 960,
 }
+
+MAINTENANCE_STRESS_DUE_DATES = {
+    "S1": 960,
+    "S2": 960,
+    "S3": 1440,
+    "S4": 1440,
+}
+
+SCENARIOS = [
+    {
+        "name": "same_case",
+        "sheet": "same_case",
+        "orders": SAME_CASE_ORDERS,
+        "due_dates": SAME_CASE_DUE_DATES,
+    },
+    {
+        "name": "maintenance_stress_case",
+        "sheet": "maint_stress",
+        "orders": MAINTENANCE_STRESS_ORDERS,
+        "due_dates": MAINTENANCE_STRESS_DUE_DATES,
+    },
+]
 
 MAINTENANCE_WINDOWS = {
     "Cutting": [(120, 60)],
@@ -43,10 +78,10 @@ MAINTENANCE_WINDOWS = {
 }
 
 
-def build_operations():
+def build_operations(orders):
     operations = []
 
-    for order in ORDERS:
+    for order in orders:
         for machine, cycle_time in PRODUCT_MACHINE_TIMES[order["product_id"]].items():
             operations.append(
                 {
@@ -92,27 +127,45 @@ def add_maintenance_constraints(model, start_vars, operations, counter):
             model += start_vars[i] >= window_end - BIG_M * before_window
 
 
-def calculate_bottleneck(schedule, makespan):
-    load = (
-        schedule.groupby("machine", as_index=False)["duration"]
-        .sum()
-        .rename(columns={"duration": "machine_load_min"})
-    )
-    load["makespan_min"] = makespan
-    load["utilization_percent"] = (100 * load["machine_load_min"] / makespan).round(2)
-    load["bottleneck_rank"] = load["machine_load_min"].rank(ascending=False, method="dense").astype(int)
-    return load.sort_values(["bottleneck_rank", "machine"])
+def calculate_bottleneck(schedule_rows, makespan):
+    machine_loads = {}
+    for row in schedule_rows:
+        machine = row["machine"]
+        machine_loads[machine] = machine_loads.get(machine, 0) + row["duration"]
+
+    sorted_loads = sorted(machine_loads.items(), key=lambda item: (-item[1], item[0]))
+    ranks = {}
+    current_rank = 0
+    previous_load = None
+
+    for machine, load in sorted_loads:
+        if load != previous_load:
+            current_rank += 1
+            previous_load = load
+        ranks[machine] = current_rank
+
+    return [
+        {
+            "machine": machine,
+            "machine_load_min": load,
+            "makespan_min": makespan,
+            "utilization_percent": round(100 * load / makespan, 2),
+            "bottleneck_rank": ranks[machine],
+        }
+        for machine, load in sorted_loads
+    ]
 
 
-def main():
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    operations = build_operations()
+def solve_scenario(scenario):
+    orders = scenario["orders"]
+    due_dates = scenario["due_dates"]
+    operations = build_operations(orders)
     counter = {"binary_variables": 0}
     op_day = {}
     condition_usage_vars = {}
     condition_maintenance_vars = {}
 
-    model = pulp.LpProblem("open_shop_pulp_same_case", pulp.LpMinimize)
+    model = pulp.LpProblem(f"open_shop_pulp_{scenario['name']}", pulp.LpMinimize)
 
     start_vars = {
         op["operation_id"]: pulp.LpVariable(f"start_{op['operation_id']}", 0, HORIZON, cat="Integer")
@@ -133,7 +186,7 @@ def main():
         machine_ops = [op for op in operations if op["machine"] == machine]
         add_no_overlap(model, start_vars, machine_ops, f"machine_{machine}", counter)
 
-    for order in ORDERS:
+    for order in orders:
         order_ops = [op for op in operations if op["order_id"] == order["order_id"]]
         add_no_overlap(model, start_vars, order_ops, f"order_{order['order_id']}", counter)
 
@@ -181,7 +234,7 @@ def main():
     add_maintenance_constraints(model, start_vars, operations, counter)
 
     tardiness_vars = {}
-    for order in ORDERS:
+    for order in orders:
         order_id = order["order_id"]
         completion = pulp.LpVariable(f"completion_{order_id}", 0, HORIZON, cat="Integer")
         tardiness = pulp.LpVariable(f"tardiness_{order_id}", 0, HORIZON, cat="Integer")
@@ -191,7 +244,7 @@ def main():
             if op["order_id"] == order_id:
                 model += completion >= end_vars[op["operation_id"]]
 
-        model += tardiness >= completion - DUE_DATES[order_id]
+        model += tardiness >= completion - due_dates[order_id]
 
     model += makespan * 1000 + sum(tardiness_vars.values())
 
@@ -201,14 +254,15 @@ def main():
     status = model.solve(solver)
     solve_time = time.perf_counter() - start_time
 
-    rows = []
+    schedule = []
     for op in operations:
         i = op["operation_id"]
         start = int(round(pulp.value(start_vars[i])))
         end = int(round(pulp.value(end_vars[i])))
 
-        rows.append(
+        schedule.append(
             {
+                "scenario": scenario["name"],
                 **op,
                 "start_min": start,
                 "end_min": end,
@@ -217,17 +271,20 @@ def main():
             }
         )
 
-    schedule = pd.DataFrame(rows).sort_values(["start_min", "machine"])
+    schedule = sorted(schedule, key=lambda row: (row["start_min"], row["machine"]))
     final_makespan = int(round(pulp.value(makespan)))
     bottleneck = calculate_bottleneck(schedule, final_makespan)
+    for row in bottleneck:
+        row["scenario"] = scenario["name"]
 
-    condition_rows = []
+    condition_maintenance = []
     for machine in MACHINES:
         for day in range(MAX_DAYS):
             key = (machine, day)
             required = int(round(pulp.value(condition_maintenance_vars[key])))
-            condition_rows.append(
+            condition_maintenance.append(
                 {
+                    "scenario": scenario["name"],
                     "solver": "PuLP CBC",
                     "machine": machine,
                     "day": day + 1,
@@ -237,30 +294,86 @@ def main():
                     "maintenance_reserved_min": MAINTENANCE_CONDITION_DURATION if required == 1 else 0,
                 }
             )
-    condition_maintenance = pd.DataFrame(condition_rows)
 
-    summary = pd.DataFrame(
-        [
-            {
-                "solver": "PuLP CBC",
-                "status": pulp.LpStatus[status],
-                "operations": len(operations),
-                "makespan_min": final_makespan,
-                "total_tardiness_min": int(round(sum(pulp.value(v) for v in tardiness_vars.values()))),
-                "binary_variables": counter["binary_variables"],
-                "solve_time_sec": round(solve_time, 3),
-                "formulation": "MILP with big-M and binary ordering variables",
-            }
-        ]
-    )
+    maintenance_triggers = sum(row["maintenance_required"] for row in condition_maintenance)
+    reserved_maintenance = sum(row["maintenance_reserved_min"] for row in condition_maintenance)
+    max_daily_usage = max(row["daily_usage_min"] for row in condition_maintenance)
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        summary.to_excel(writer, sheet_name="Summary", index=False)
-        schedule.to_excel(writer, sheet_name="Schedule", index=False)
-        bottleneck.to_excel(writer, sheet_name="Bottleneck", index=False)
-        condition_maintenance.to_excel(writer, sheet_name="Condition Maintenance", index=False)
+    summary = [
+        {
+            "scenario": scenario["name"],
+            "solver": "PuLP CBC",
+            "status": pulp.LpStatus[status],
+            "orders": len(orders),
+            "operations": len(operations),
+            "makespan_min": final_makespan,
+            "total_tardiness_min": int(round(sum(pulp.value(v) for v in tardiness_vars.values()))),
+            "maintenance_triggers": maintenance_triggers,
+            "reserved_maintenance_min": reserved_maintenance,
+            "max_daily_usage_min": max_daily_usage,
+            "binary_variables": counter["binary_variables"],
+            "solve_time_sec": round(solve_time, 3),
+            "formulation": "MILP with big-M and binary ordering variables",
+        }
+    ]
 
-    print(summary.to_string(index=False))
+    return summary, schedule, bottleneck, condition_maintenance
+
+
+def write_sheet(workbook, sheet_name, rows):
+    worksheet = workbook.create_sheet(sheet_name)
+    if not rows:
+        return
+
+    headers = list(rows[0].keys())
+    worksheet.append(headers)
+
+    for row in rows:
+        worksheet.append([row.get(header) for header in headers])
+
+    for column_index, header in enumerate(headers, start=1):
+        values = [str(header)] + [str(row.get(header, "")) for row in rows]
+        width = min(max(len(value) for value in values) + 2, 35)
+        worksheet.column_dimensions[get_column_letter(column_index)].width = width
+
+
+def save_workbook(output_file, summary_rows, scenario_results):
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+
+    write_sheet(workbook, "Summary", summary_rows)
+
+    for scenario, _, schedule, bottleneck, condition_maintenance in scenario_results:
+        suffix = scenario["sheet"]
+        write_sheet(workbook, f"Schedule_{suffix}", schedule)
+        write_sheet(workbook, f"Bottleneck_{suffix}", bottleneck)
+        write_sheet(workbook, f"Condition_{suffix}", condition_maintenance)
+
+    workbook.save(output_file)
+
+
+def print_summary(summary_rows):
+    headers = list(summary_rows[0].keys())
+    print("\t".join(headers))
+    for row in summary_rows:
+        print("\t".join(str(row.get(header, "")) for header in headers))
+
+
+def main():
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for scenario in SCENARIOS:
+        print(f"Solving {scenario['name']} with PuLP...")
+        results.append((scenario, *solve_scenario(scenario)))
+
+    summary = []
+    for _, scenario_summary, _, _, _ in results:
+        summary.extend(scenario_summary)
+
+    save_workbook(OUTPUT_FILE, summary, results)
+
+    print_summary(summary)
     print(f"\nExcel file created: {OUTPUT_FILE}")
 
 

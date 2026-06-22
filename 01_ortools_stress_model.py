@@ -1,12 +1,3 @@
-"""
-OR-Tools open shop scheduling model with stress testing.
-
-Run:
-    python outputs/final_open_shop/01_ortools_stress_model.py
-
-Output:
-    outputs/final_open_shop/results/ortools_stress_results.xlsx
-"""
 
 import random
 import time

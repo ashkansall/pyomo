@@ -1,16 +1,3 @@
-"""
-PuLP MILP model for the same original open shop case.
-
-This file is used to compare with OR-Tools. It uses the same original orders,
-machines, durations, shift rule, machine no-overlap, batch no-overlap, due dates,
-and simple maintenance windows.
-
-Run:
-    python outputs/final_open_shop/02_pulp_same_case.py
-
-Output:
-    outputs/final_open_shop/results/pulp_same_case_results.xlsx
-"""
 
 import time
 from pathlib import Path

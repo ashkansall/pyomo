@@ -20,6 +20,11 @@ SHIFT_LENGTH = 8 * 60
 MAX_DAYS = 5
 HORIZON = SHIFT_LENGTH * MAX_DAYS
 BIG_M = HORIZON
+
+# adding maintenance non-linear constraints 
+maintenance_usage_limit = 180
+maintenance_condition_duration = 30
+
 OUTPUT_FILE = Path("outputs/final_open_shop/results/pyomo_same_case_results.xlsx")
 
 ORDERS = [
@@ -144,6 +149,14 @@ def main():
     day_keys = [(op["operation_id"], day) for op in operations for day in range(MAX_DAYS)]
     ordering_keys = pairwise_keys(operations)
     maint_keys = maintenance_keys(operations)
+    
+    # for conditioned-based maintenance 
+    
+    condition_maintenance_keys = [
+    (machine, day)
+    for machine in MACHINES
+    for day in range(MAX_DAYS)
+    ]
 
     duration = {op["operation_id"]: op["duration"] for op in operations}
 
@@ -154,6 +167,10 @@ def main():
     model.in_day = Var(day_keys, within=Binary)
     model.ordering = Var(range(len(ordering_keys)), within=Binary)
     model.before_maintenance = Var(range(len(maint_keys)), within=Binary)
+    
+    # for conditioned based maintenance 
+    model.condition_maintenance = Var(condition_maintenance_keys, within=Binary)
+    
     model.completion = Var(order_ids, within=NonNegativeIntegers, bounds=(0, HORIZON))
     model.tardiness = Var(order_ids, within=NonNegativeIntegers, bounds=(0, HORIZON))
 
@@ -176,7 +193,38 @@ def main():
         for day in range(MAX_DAYS):
             model.constraints.add(model.start[i] >= day * SHIFT_LENGTH - BIG_M * (1 - model.in_day[i, day]))
             model.constraints.add(model.end[i] <= (day + 1) * SHIFT_LENGTH + BIG_M * (1 - model.in_day[i, day]))
+            
+            
+    # for conditioned based maintenance
+    
+    for machine in MACHINES:
+        machine_ops = [op for op in operations if op["machine"] == machine]
 
+    for day in range(MAX_DAYS):
+        daily_usage = sum(
+            duration[op["operation_id"]] * model.in_day[op["operation_id"], day]
+            for op in machine_ops
+        )
+
+        maintenance_required = model.condition_maintenance[machine, day]
+
+        model.constraints.add(
+            daily_usage
+            <= maintenance_usage_limit + BIG_M * maintenance_required
+        )
+
+        model.constraints.add(
+            daily_usage
+            >= maintenance_usage_limit + 1
+            - BIG_M * (1 - maintenance_required)
+        )
+
+        model.constraints.add(
+            daily_usage
+            + maintenance_condition_duration * maintenance_required
+            <= SHIFT_LENGTH
+        )
+        
     for index, (i, _, op_duration, window_start, window_end) in enumerate(maint_keys):
         before = model.before_maintenance[index]
         model.constraints.add(model.start[i] + op_duration <= window_start + BIG_M * (1 - before))
@@ -222,7 +270,14 @@ def main():
     bottleneck = calculate_bottleneck(schedule, final_makespan)
     total_tardiness = int(round(sum(value(model.tardiness[order_id]) for order_id in order_ids)))
 
-    binary_variables = len(day_keys) + len(ordering_keys) + len(maint_keys)
+    # binary_variables = len(day_keys) + len(ordering_keys) + len(maint_keys)
+    # after adding conditioned based constraints :
+    binary_variables = (
+        len(day_keys)
+        + len(ordering_keys)
+        + len(maint_keys)
+        + len(condition_maintenance_keys)
+    )
 
     summary = pd.DataFrame(
         [

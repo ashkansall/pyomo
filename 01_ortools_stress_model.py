@@ -10,6 +10,11 @@ from ortools.sat.python import cp_model
 SHIFT_LENGTH = 8 * 60
 OUTPUT_FILE = Path("outputs/final_open_shop/results/ortools_stress_results.xlsx")
 
+# adding maintenance non-linear constraints 
+maintenance_usage_limit = 180
+maintenance_condition_duration = 30
+
+
 MACHINES = ["Cutting", "Drilling", "Milling", "Welding", "Painting", "Inspection"]
 
 PRODUCT_MACHINE_TIMES = {
@@ -216,6 +221,9 @@ def solve_scenario(scenario):
     intervals = {}
     machine_intervals = {machine: [] for machine in MACHINES}
     batch_intervals = {}
+    
+    # for non-linear conditions
+    op_day = {}
 
     for op in operations:
         i = op["operation_id"]
@@ -229,29 +237,57 @@ def solve_scenario(scenario):
         machine_intervals[op["machine"]].append(interval)
         batch_intervals.setdefault(op["batch_id"], []).append(interval)
 
+    
+    # fixed-maintenance
+    
     if scenario["maintenance"]:
         for machine, windows in maintenance_windows(max_days).items():
             for index, (start, duration) in enumerate(windows):
                 blocked = model.NewFixedSizeIntervalVar(start, duration, f"maintenance_{machine}_{index}")
                 machine_intervals[machine].append(blocked)
 
+    #  Machine no-overlap
     for machine in MACHINES:
         model.AddNoOverlap(machine_intervals[machine])
-
+    # Batch no-overlap
     for batch_id in batch_intervals:
         model.AddNoOverlap(batch_intervals[batch_id])
 
+    
+    # shift BLOCK
     for op in operations:
         i = op["operation_id"]
         day_choices = []
 
         for day in range(max_days):
             in_day = model.NewBoolVar(f"op_{i}_day_{day + 1}")
+            # for non-linear condition
+            op_day[(i, day)] = in_day
             day_choices.append(in_day)
             model.Add(start_vars[i] >= day * SHIFT_LENGTH).OnlyEnforceIf(in_day)
             model.Add(end_vars[i] <= (day + 1) * SHIFT_LENGTH).OnlyEnforceIf(in_day)
 
         model.AddExactlyOne(day_choices)
+    # end of shift BLOCK
+    
+    # condition-based maintenance 
+    if scenario["maintenance"]:
+        for machine in MACHINES:
+            machine_ops = [op for op in operations if op["machine"] == machine]
+            
+            for day in range(max_days):
+                daily_usage = model.new_int_var(0, SHIFT_LENGTH, f"usage_{machine}_day_{day + 1}")
+                model.Add(
+                    daily_usage == 
+                    sum(
+                        op["duration"] * op_day[(op["operation_id"], day)]
+                        for op in machine_ops
+                    )
+                          )
+                maintenance_required = model.new_bool_var(f"condition_maintenance_{machine}_day_{day +1}")
+                model.Add(daily_usage <= maintenance_usage_limit).OnlyEnforceIf(maintenance_required.Not())
+                model.Add(daily_usage >= maintenance_usage_limit + 1).OnlyEnforceIf(maintenance_required)
+                model.Add(daily_usage + maintenance_condition_duration * maintenance_required <= SHIFT_LENGTH)
 
     if scenario["operator_limit"]:
         model.AddCumulative(

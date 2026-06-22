@@ -271,7 +271,7 @@ def solve_scenario(scenario):
     # end of shift BLOCK
     
     # condition-based maintenance 
-    if scenario["maintenance"]:
+    if scenario["conditioned-based maintenance"]:
         for machine in MACHINES:
             machine_ops = [op for op in operations if op["machine"] == machine]
             

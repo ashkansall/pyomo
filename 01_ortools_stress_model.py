@@ -1,4 +1,3 @@
-
 import random
 import time
 from pathlib import Path
@@ -7,13 +6,12 @@ import pandas as pd
 from ortools.sat.python import cp_model
 
 
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_FILE = BASE_DIR / "results" / "ortools_stress_results.xlsx"
+
 SHIFT_LENGTH = 8 * 60
-OUTPUT_FILE = Path("outputs/final_open_shop/results/ortools_stress_results.xlsx")
-
-# adding maintenance non-linear constraints 
-maintenance_usage_limit = 180
-maintenance_condition_duration = 30
-
+MAINTENANCE_USAGE_LIMIT = 180
+MAINTENANCE_CONDITION_DURATION = 30
 
 MACHINES = ["Cutting", "Drilling", "Milling", "Welding", "Painting", "Inspection"]
 
@@ -221,9 +219,9 @@ def solve_scenario(scenario):
     intervals = {}
     machine_intervals = {machine: [] for machine in MACHINES}
     batch_intervals = {}
-    
-    # for non-linear conditions
     op_day = {}
+    condition_usage_vars = {}
+    condition_maintenance_vars = {}
 
     for op in operations:
         i = op["operation_id"]
@@ -237,57 +235,56 @@ def solve_scenario(scenario):
         machine_intervals[op["machine"]].append(interval)
         batch_intervals.setdefault(op["batch_id"], []).append(interval)
 
-    
-    # fixed-maintenance
-    
     if scenario["maintenance"]:
         for machine, windows in maintenance_windows(max_days).items():
             for index, (start, duration) in enumerate(windows):
                 blocked = model.NewFixedSizeIntervalVar(start, duration, f"maintenance_{machine}_{index}")
                 machine_intervals[machine].append(blocked)
 
-    #  Machine no-overlap
     for machine in MACHINES:
         model.AddNoOverlap(machine_intervals[machine])
-    # Batch no-overlap
+
     for batch_id in batch_intervals:
         model.AddNoOverlap(batch_intervals[batch_id])
 
-    
-    # shift BLOCK
     for op in operations:
         i = op["operation_id"]
         day_choices = []
 
         for day in range(max_days):
             in_day = model.NewBoolVar(f"op_{i}_day_{day + 1}")
-            # for non-linear condition
             op_day[(i, day)] = in_day
             day_choices.append(in_day)
             model.Add(start_vars[i] >= day * SHIFT_LENGTH).OnlyEnforceIf(in_day)
             model.Add(end_vars[i] <= (day + 1) * SHIFT_LENGTH).OnlyEnforceIf(in_day)
 
         model.AddExactlyOne(day_choices)
-    # end of shift BLOCK
-    
-    # condition-based maintenance 
-    if scenario["conditioned-based maintenance"]:
+
+    if scenario["maintenance"]:
         for machine in MACHINES:
             machine_ops = [op for op in operations if op["machine"] == machine]
-            
+
             for day in range(max_days):
-                daily_usage = model.new_int_var(0, SHIFT_LENGTH, f"usage_{machine}_day_{day + 1}")
+                daily_usage = model.NewIntVar(0, SHIFT_LENGTH, f"usage_{machine}_day_{day + 1}")
+                maintenance_required = model.NewBoolVar(f"condition_maintenance_{machine}_day_{day + 1}")
+
+                condition_usage_vars[(machine, day)] = daily_usage
+                condition_maintenance_vars[(machine, day)] = maintenance_required
+
                 model.Add(
-                    daily_usage == 
-                    sum(
+                    daily_usage
+                    == sum(
                         op["duration"] * op_day[(op["operation_id"], day)]
                         for op in machine_ops
                     )
-                          )
-                maintenance_required = model.new_bool_var(f"condition_maintenance_{machine}_day_{day +1}")
-                model.Add(daily_usage <= maintenance_usage_limit).OnlyEnforceIf(maintenance_required.Not())
-                model.Add(daily_usage >= maintenance_usage_limit + 1).OnlyEnforceIf(maintenance_required)
-                model.Add(daily_usage + maintenance_condition_duration * maintenance_required <= SHIFT_LENGTH)
+                )
+                model.Add(daily_usage <= MAINTENANCE_USAGE_LIMIT).OnlyEnforceIf(maintenance_required.Not())
+                model.Add(daily_usage >= MAINTENANCE_USAGE_LIMIT + 1).OnlyEnforceIf(maintenance_required)
+                model.Add(
+                    daily_usage
+                    + MAINTENANCE_CONDITION_DURATION * maintenance_required
+                    <= SHIFT_LENGTH
+                )
 
     if scenario["operator_limit"]:
         model.AddCumulative(
@@ -324,7 +321,7 @@ def solve_scenario(scenario):
     solve_time = time.perf_counter() - solve_start
 
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        return pd.DataFrame(), pd.DataFrame(), {
+        summary = {
             "scenario": scenario["name"],
             "status": solver.StatusName(status),
             "orders": len({order["order_id"] for order in orders}),
@@ -333,6 +330,7 @@ def solve_scenario(scenario):
             "makespan_min": None,
             "solve_time_sec": round(solve_time, 3),
         }
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), summary
 
     rows = []
     for op in operations:
@@ -353,6 +351,25 @@ def solve_scenario(scenario):
     schedule = pd.DataFrame(rows).sort_values(["start_min", "machine"])
     bottleneck = calculate_bottleneck(schedule, solver.Value(makespan))
 
+    condition_rows = []
+    for machine in MACHINES:
+        for day in range(max_days):
+            key = (machine, day)
+            if key in condition_usage_vars:
+                required = solver.Value(condition_maintenance_vars[key])
+                condition_rows.append(
+                    {
+                        "scenario": scenario["name"],
+                        "machine": machine,
+                        "day": day + 1,
+                        "daily_usage_min": solver.Value(condition_usage_vars[key]),
+                        "threshold_min": MAINTENANCE_USAGE_LIMIT,
+                        "maintenance_required": required,
+                        "maintenance_reserved_min": MAINTENANCE_CONDITION_DURATION if required == 1 else 0,
+                    }
+                )
+    condition_maintenance = pd.DataFrame(condition_rows)
+
     summary = {
         "scenario": scenario["name"],
         "status": solver.StatusName(status),
@@ -372,7 +389,7 @@ def solve_scenario(scenario):
         "objective_value": round(solver.ObjectiveValue(), 3),
     }
 
-    return schedule, bottleneck, summary
+    return schedule, bottleneck, condition_maintenance, summary
 
 
 def short_sheet_name(prefix, name):
@@ -385,14 +402,16 @@ def main():
     summaries = []
     schedules = {}
     bottlenecks = {}
+    condition_maintenance_results = {}
 
     print("Running OR-Tools open shop stress model")
 
     for scenario in SCENARIOS:
-        schedule, bottleneck, summary = solve_scenario(scenario)
+        schedule, bottleneck, condition_maintenance, summary = solve_scenario(scenario)
         summaries.append(summary)
         schedules[scenario["name"]] = schedule
         bottlenecks[scenario["name"]] = bottleneck
+        condition_maintenance_results[scenario["name"]] = condition_maintenance
 
         print(
             f"{scenario['name']}: {summary['status']}, "
@@ -406,6 +425,10 @@ def main():
 
         for name, bottleneck in bottlenecks.items():
             bottleneck.to_excel(writer, sheet_name=short_sheet_name("bn", name), index=False)
+
+        for name, condition_df in condition_maintenance_results.items():
+            if not condition_df.empty:
+                condition_df.to_excel(writer, sheet_name=short_sheet_name("cbm", name), index=False)
 
         for name, schedule in schedules.items():
             schedule.to_excel(writer, sheet_name=short_sheet_name("sch", name), index=False)

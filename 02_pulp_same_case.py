@@ -1,4 +1,3 @@
-
 import time
 from pathlib import Path
 
@@ -6,17 +5,15 @@ import pandas as pd
 import pulp
 
 
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_FILE = BASE_DIR / "results" / "pulp_same_case_results.xlsx"
+
 SHIFT_LENGTH = 8 * 60
 MAX_DAYS = 5
 HORIZON = SHIFT_LENGTH * MAX_DAYS
 BIG_M = HORIZON
-
-# adding maintenance non-linear constraints 
-maintenance_usage_limit = 180
-maintenance_condition_duration = 30
-
-
-OUTPUT_FILE = Path("outputs/final_open_shop/results/pulp_same_case_results.xlsx")
+MAINTENANCE_USAGE_LIMIT = 180
+MAINTENANCE_CONDITION_DURATION = 30
 
 ORDERS = [
     {"order_id": "O1", "batch_id": "O1_B1", "product_id": "P1", "quantity": 10},
@@ -67,7 +64,6 @@ def build_operations():
 
 
 def add_no_overlap(model, start_vars, operations, name, counter):
-    """Either operation i is before j, or operation j is before i."""
     for left_index in range(len(operations)):
         for right_index in range(left_index + 1, len(operations)):
             left = operations[left_index]
@@ -83,7 +79,6 @@ def add_no_overlap(model, start_vars, operations, name, counter):
 
 
 def add_maintenance_constraints(model, start_vars, operations, counter):
-    """Operations must be either before or after each maintenance window."""
     for op in operations:
         machine = op["machine"]
 
@@ -113,10 +108,9 @@ def main():
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     operations = build_operations()
     counter = {"binary_variables": 0}
-    
-    
-    #condition_based maintenance
     op_day = {}
+    condition_usage_vars = {}
+    condition_maintenance_vars = {}
 
     model = pulp.LpProblem("open_shop_pulp_same_case", pulp.LpMinimize)
 
@@ -128,7 +122,6 @@ def main():
         op["operation_id"]: pulp.LpVariable(f"end_{op['operation_id']}", 0, HORIZON, cat="Integer")
         for op in operations
     }
-
     makespan = pulp.LpVariable("makespan", 0, HORIZON, cat="Integer")
 
     for op in operations:
@@ -150,10 +143,7 @@ def main():
 
         for day in range(MAX_DAYS):
             in_day = pulp.LpVariable(f"op_{i}_day_{day + 1}", cat="Binary")
-            
-            # for condtioned-based maintenance
             op_day[(i, day)] = in_day
-            
             counter["binary_variables"] += 1
             day_choices.append(in_day)
 
@@ -161,50 +151,32 @@ def main():
             model += end_vars[i] <= (day + 1) * SHIFT_LENGTH + BIG_M * (1 - in_day)
 
         model += sum(day_choices) == 1
-        
-        
-        #CONDITION-BASED MAINTENANCE HERE
-        
-        
+
     for machine in MACHINES:
-            machine_ops = [op for op in operations if op["machine"] == machine]
+        machine_ops = [op for op in operations if op["machine"] == machine]
 
-            for day in range(MAX_DAYS):
-                daily_usage = pulp.LpVariable(
-                    f"usage_{machine}_day_{day + 1}",
-                    lowBound=0,
-                    upBound=SHIFT_LENGTH,
-                    cat="Integer",
-                )
+        for day in range(MAX_DAYS):
+            daily_usage = pulp.LpVariable(
+                f"usage_{machine}_day_{day + 1}",
+                lowBound=0,
+                upBound=SHIFT_LENGTH,
+                cat="Integer",
+            )
+            maintenance_required = pulp.LpVariable(
+                f"condition_maintenance_{machine}_day_{day + 1}",
+                cat="Binary",
+            )
+            counter["binary_variables"] += 1
+            condition_usage_vars[(machine, day)] = daily_usage
+            condition_maintenance_vars[(machine, day)] = maintenance_required
 
-                maintenance_required = pulp.LpVariable(
-                    f"condition_maintenance_{machine}_day_{day + 1}",
-                    cat="Binary",
-                )
-
-                counter["binary_variables"] += 1
-
-                model += daily_usage == sum(
-                    op["duration"] * op_day[(op["operation_id"], day)]
-                    for op in machine_ops
-                )
-
-                model += daily_usage <= (
-                    maintenance_usage_limit
-                    + BIG_M * maintenance_required
-                )
-
-                model += daily_usage >= (
-                    maintenance_usage_limit + 1
-                    - BIG_M * (1 - maintenance_required)
-                )
-
-                model += (
-                    daily_usage
-                    + maintenance_condition_duration * maintenance_required
-                    <= SHIFT_LENGTH
-                )
-        
+            model += daily_usage == sum(
+                op["duration"] * op_day[(op["operation_id"], day)]
+                for op in machine_ops
+            )
+            model += daily_usage <= MAINTENANCE_USAGE_LIMIT + BIG_M * maintenance_required
+            model += daily_usage >= MAINTENANCE_USAGE_LIMIT + 1 - BIG_M * (1 - maintenance_required)
+            model += daily_usage + MAINTENANCE_CONDITION_DURATION * maintenance_required <= SHIFT_LENGTH
 
     add_maintenance_constraints(model, start_vars, operations, counter)
 
@@ -249,6 +221,24 @@ def main():
     final_makespan = int(round(pulp.value(makespan)))
     bottleneck = calculate_bottleneck(schedule, final_makespan)
 
+    condition_rows = []
+    for machine in MACHINES:
+        for day in range(MAX_DAYS):
+            key = (machine, day)
+            required = int(round(pulp.value(condition_maintenance_vars[key])))
+            condition_rows.append(
+                {
+                    "solver": "PuLP CBC",
+                    "machine": machine,
+                    "day": day + 1,
+                    "daily_usage_min": int(round(pulp.value(condition_usage_vars[key]))),
+                    "threshold_min": MAINTENANCE_USAGE_LIMIT,
+                    "maintenance_required": required,
+                    "maintenance_reserved_min": MAINTENANCE_CONDITION_DURATION if required == 1 else 0,
+                }
+            )
+    condition_maintenance = pd.DataFrame(condition_rows)
+
     summary = pd.DataFrame(
         [
             {
@@ -268,6 +258,7 @@ def main():
         summary.to_excel(writer, sheet_name="Summary", index=False)
         schedule.to_excel(writer, sheet_name="Schedule", index=False)
         bottleneck.to_excel(writer, sheet_name="Bottleneck", index=False)
+        condition_maintenance.to_excel(writer, sheet_name="Condition Maintenance", index=False)
 
     print(summary.to_string(index=False))
     print(f"\nExcel file created: {OUTPUT_FILE}")

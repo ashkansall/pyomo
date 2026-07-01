@@ -407,9 +407,6 @@ def short_sheet_name(prefix, name):
     return f"{prefix}_{name}"[:31]
 
 
-
-
-
 # gnatt demostration
 def minute_label(minute):
     day = minute // SHIFT_LENGTH + 1
@@ -611,6 +608,153 @@ def create_ortools_gantt(schedule, condition_df, scenario_name, max_days):
 
 # gnatt demostration END
 
+# KPI and bottleneck dashboard START
+
+def get_condition_totals(condition_df):
+    if condition_df is None or condition_df.empty:
+        return 0, 0
+
+    triggers = int(condition_df["maintenance_required"].sum())
+    reserved = int(condition_df["maintenance_reserved_min"].sum())
+    return triggers, reserved
+
+
+def create_kpi_dashboard(summaries, condition_maintenance_results):
+    chart_dir = BASE_DIR / "results" / "charts"
+    chart_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+
+    for summary in summaries:
+        scenario = summary["scenario"]
+        condition_df = condition_maintenance_results.get(scenario)
+        triggers, reserved = get_condition_totals(condition_df)
+
+        rows.append(
+            {
+                "Scenario": scenario,
+                "Status": summary.get("status"),
+                "Orders": summary.get("orders"),
+                "Batches": summary.get("batches"),
+                "Operations": summary.get("operations"),
+                "Makespan min": summary.get("makespan_min"),
+                "Makespan days": summary.get("makespan_days"),
+                "Tardiness min": summary.get("total_tardiness_min"),
+                "Bottleneck": summary.get("bottleneck_machine"),
+                "Bottleneck %": summary.get("bottleneck_utilization_percent"),
+                "Maint. triggers": triggers,
+                "Maint. reserved min": reserved,
+                "Solver time sec": summary.get("solve_time_sec"),
+            }
+        )
+
+    headers = list(rows[0].keys())
+
+    fig = go.Figure(
+        data=[
+            go.Table(
+                header=dict(
+                    values=headers,
+                    fill_color="#111827",
+                    font=dict(color="white", size=13),
+                    align="center",
+                    height=36,
+                ),
+                cells=dict(
+                    values=[[row[col] for row in rows] for col in headers],
+                    fill_color=[
+                        [
+                            "#f9fafb" if i % 2 == 0 else "#eef2ff"
+                            for i in range(len(rows))
+                        ]
+                    ],
+                    font=dict(color="#111827", size=12),
+                    align="center",
+                    height=32,
+                ),
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title="OR-Tools KPI Summary Dashboard",
+        width=1600,
+        height=430,
+        margin=dict(l=20, r=20, t=70, b=20),
+    )
+
+    output_html = chart_dir / "kpi_summary_ortools.html"
+    fig.write_html(output_html)
+
+    print(f"KPI dashboard created: {output_html}")
+
+
+def create_bottleneck_bar_chart(bottleneck, scenario_name):
+    if bottleneck is None or bottleneck.empty:
+        print(f"No bottleneck chart created for {scenario_name}: empty bottleneck data")
+        return
+
+    chart_dir = BASE_DIR / "results" / "charts"
+    chart_dir.mkdir(parents=True, exist_ok=True)
+
+    data = bottleneck.sort_values("machine_load_min", ascending=False).copy()
+
+    colors = []
+    for rank in data["bottleneck_rank"]:
+        if rank == 1:
+            colors.append("#dc2626")  # red = bottleneck
+        else:
+            colors.append("#2563eb")  # blue = normal machine
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Bar(
+            x=data["machine"],
+            y=data["machine_load_min"],
+            marker=dict(
+                color=colors,
+                line=dict(color="#111827", width=1.5),
+            ),
+            text=[
+                f"{load} min<br>{util}%"
+                for load, util in zip(
+                    data["machine_load_min"],
+                    data["utilization_percent"],
+                )
+            ],
+            textposition="outside",
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Machine load: %{y} min<br>"
+                "Utilization: %{customdata}%<extra></extra>"
+            ),
+            customdata=data["utilization_percent"],
+        )
+    )
+
+    bottleneck_machine = data.iloc[0]["machine"]
+
+    fig.update_layout(
+        title=f"Bottleneck Analysis - {scenario_name}<br><sup>Main bottleneck: {bottleneck_machine}</sup>",
+        xaxis_title="Machine",
+        yaxis_title="Total machine load in minutes",
+        width=1100,
+        height=620,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=70, r=30, t=90, b=80),
+    )
+
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(180,180,180,0.35)")
+    fig.update_xaxes(showgrid=False)
+
+    output_html = chart_dir / f"bottleneck_{scenario_name}.html"
+    fig.write_html(output_html)
+
+    print(f"Bottleneck chart created: {output_html}")
+
+# KPI and bottleneck dashboard END
 
 def main():
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -661,6 +805,15 @@ def main():
             chart_scenario["max_days"],
         )
         # gnatt demostration code END
+        create_kpi_dashboard(
+            summaries,
+            condition_maintenance_results,
+        )
+
+        create_bottleneck_bar_chart(
+            bottlenecks[chart_scenario_name],
+            chart_scenario_name,
+        )
 
     print(f"\nExcel file created: {OUTPUT_FILE}")
 

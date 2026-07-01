@@ -1,592 +1,482 @@
-# Open Shop Scheduling with OR-Tools, PuLP, and Pyomo
+# Open Shop Scheduling Project Report
 
-## 1. Project Objective
+## 1. Project Idea
 
-The objective of this project is to schedule manufacturing orders in an open shop production system.
-Each order has a product type and quantity, and each product requires processing on selected machines such as Cutting, Drilling, Milling, Welding, Painting, and Inspection.
+This project solves an open shop scheduling problem for a manufacturing system.
 
-The processing time of each operation is calculated as:
+The company has customer orders. Each order has:
+
+- an order ID
+- a batch ID
+- a product ID
+- a quantity
+
+Each product needs processing on selected machines such as Cutting, Drilling, Milling, Welding, Painting, and Inspection.
+
+The processing time is calculated as:
 
 ```text
 operation duration = cycle time per unit x order quantity
 ```
 
-The goal is to minimize the makespan, which is the finish time of the last completed operation.
-When due dates are active, the code uses a weighted objective:
+The goal is to create a feasible production schedule and minimize the makespan.
+
+```text
+makespan = finish time of the last completed operation
+```
+
+This is an open shop problem because the operations of the same order do not have a fixed sequence. The optimizer can decide the best order of operations.
+
+## 2. Project Files
+
+The project has three main model files:
+
+| File | Solver | Purpose |
+|---|---|---|
+| `01_ortools_stress_model.py` | OR-Tools CP-SAT | Main model, stress tests, Gantt chart, KPI dashboard, bottleneck chart |
+| `02_pulp_same_case.py` | PuLP CBC | Same case and maintenance stress case using MILP |
+| `03_pyomo_same_case.py` | Pyomo CBC | Same case and maintenance stress case using MILP |
+
+The result files are:
+
+| Result File | Content |
+|---|---|
+| `ortools_stress_results.xlsx` | OR-Tools stress results, schedules, bottlenecks, maintenance analysis |
+| `pulp_same_case_results.xlsx` | PuLP same case and maintenance stress case |
+| `pyomo_same_case_results.xlsx` | Pyomo same case and maintenance stress case |
+
+The chart files are:
+
+| Chart File | Meaning |
+|---|---|
+| `gantt_04_realistic_constraints.html` | Detailed OR-Tools Gantt chart |
+| `kpi_summary_ortools.html` | KPI dashboard |
+| `bottleneck_04_realistic_constraints.html` | Bottleneck bar chart |
+
+## 3. Main Constraints
+
+The model includes these constraints:
+
+1. Each required operation is processed once.
+2. Each machine can process only one operation at a time.
+3. Operations of the same order or batch cannot overlap.
+4. Operations are not interrupted once they start.
+5. Each operation must fit inside a work shift.
+6. Planned maintenance blocks selected machines.
+7. Condition-based maintenance is triggered by daily machine usage.
+8. Due dates are included in some scenarios.
+9. Operator capacity is limited in the realistic and large OR-Tools scenarios.
+10. The objective minimizes makespan and also penalizes tardiness.
+
+The objective is:
 
 ```text
 objective = makespan x 1000 + total tardiness
 ```
 
-This makes makespan the dominant target while still discouraging late orders.
+This means makespan is the main goal, while tardiness is still considered.
 
-## 2. Why This Is an Open Shop Problem
+## 4. Nonlinear Maintenance Rule
 
-This is an open shop scheduling problem because the operations of the same order do not have a fixed sequence.
-For example, if one batch needs Cutting, Drilling, and Painting, the model does not force Cutting before Drilling or Painting.
-The solver chooses the operation order that gives the best feasible schedule.
-
-This is different from:
-
-| Scheduling Type | Main Difference |
-|---|---|
-| Job shop | Each job has a fixed machine sequence |
-| Flow shop | All jobs follow the same machine sequence |
-| Open shop | Operations are flexible and can be sequenced by the optimizer |
-
-## 3. Final Files
-
-The final project compares three optimization approaches:
-
-| File | Solver | Purpose |
-|---|---|---|
-| `01_ortools_stress_model.py` | OR-Tools CP-SAT | Main model, stress testing, bottleneck analysis |
-| `02_pulp_same_case.py` | PuLP CBC | Same original case and activated maintenance stress case using a MILP formulation |
-| `03_pyomo_same_case.py` | Pyomo CBC | Same original case and activated maintenance stress case using a MILP formulation |
-
-The Excel result files used for this report are:
-
-| Result File | Main Content |
-|---|---|
-| `ortools_stress_results.xlsx` | Five stress scenarios, schedules, bottlenecks, condition-based maintenance |
-| `pulp_same_case_results.xlsx` | Same-case and maintenance-stress schedules, bottlenecks, condition-based maintenance |
-| `pyomo_same_case_results.xlsx` | Same-case and maintenance-stress schedules, bottlenecks, condition-based maintenance |
-
-## 4. Main Constraints
-
-The models include the following constraints:
-
-1. Each required operation is scheduled exactly once.
-2. Each machine can process only one operation at a time.
-3. The same batch cannot be processed on two machines at the same time.
-4. Operations are non-interruptible.
-5. Each operation must start and finish inside one work shift.
-6. Due dates are included in the due-date and realistic stress scenarios.
-7. Fixed maintenance windows block machines in maintenance scenarios.
-8. Condition-based maintenance is triggered when daily machine usage is above 180 minutes.
-9. Operator capacity is limited in the realistic and large OR-Tools stress scenarios.
-10. The objective strongly prioritizes makespan and also penalizes tardiness when due dates exist.
-
-## 5. Condition-Based Maintenance Rule
-
-The added realistic maintenance rule is:
+The important nonlinear industrial rule is:
 
 ```text
-If a machine is used for more than 180 minutes in one day,
-reserve 30 minutes of that machine-day for maintenance.
+If machine daily usage > 180 minutes,
+reserve 30 minutes for maintenance.
 ```
 
-This is dynamic because the maintenance requirement depends on the schedule produced by the solver.
-Before solving, we do not know which machine-days will exceed 180 minutes.
-The optimizer decides the schedule, calculates daily machine usage, and then triggers maintenance if the threshold is crossed.
-
-This is also a nonlinear or piecewise industrial rule in real life:
+This is nonlinear in the industrial meaning because the behavior changes after a threshold:
 
 ```text
-usage <= 180 minutes -> no extra maintenance
+usage <= 180 minutes -> no maintenance
 usage > 180 minutes  -> 30 minutes maintenance
 ```
 
-Optimization solvers usually cannot handle this threshold directly in a simple linear scheduling model.
-Therefore, the condition is linearized with Boolean or binary variables.
-The model creates a maintenance trigger variable for each machine and day.
+In the code, this is converted into a linear or Boolean optimization form.
 
-## 6. How the Maintenance Rule Changes the Schedule
-
-The condition-based maintenance rule reduces available machine capacity on busy days.
-For example, a normal shift has 480 available minutes.
-If a machine-day triggers maintenance, then 30 minutes are reserved for maintenance, so production must fit into the remaining capacity:
+The model uses:
 
 ```text
-daily production usage + 30 maintenance minutes <= 480 shift minutes
+maintenance_required = 0 or 1
 ```
 
-This can increase makespan, increase tardiness, and make the solver work harder because the model has more decision variables and threshold constraints.
+Then it applies constraints like:
 
-In the small same-case, the rule does not change the schedule because no machine exceeds the 180-minute daily threshold.
-In the larger OR-Tools stress cases, the rule is triggered many times, so it has a real effect on available capacity.
+```text
+daily_usage <= 180 + M x maintenance_required
+daily_usage >= 181 - M x (1 - maintenance_required)
+daily_usage + 30 x maintenance_required <= 480
+```
 
-## 7. OR-Tools Stress Test Results
+So the project has a nonlinear maintenance idea, but it is solved using binary variables.
 
-The OR-Tools file stress-tests the model by adding more orders, more batches, due dates, maintenance, operator limits, and condition-based maintenance.
+## 5. What Happens in the OR-Tools Code
 
-| Scenario | Status | Orders | Batches | Operations | Makespan min | Makespan days | Tardiness min | Bottleneck | Solver time sec |
-|---|---|---:|---:|---:|---:|---:|---:|---|---:|
-| `01_same_case` | OPTIMAL | 4 | 4 | 12 | 168 | 0.350 | 0 | Painting | 0.049 |
-| `02_more_products_batches` | OPTIMAL | 15 | 30 | 95 | 462 | 0.963 | 0 | Milling | 0.296 |
-| `03_due_dates` | OPTIMAL | 25 | 54 | 176 | 1012 | 2.108 | 1005 | Milling | 0.832 |
-| `04_realistic_constraints` | FEASIBLE | 35 | 90 | 285 | 1901 | 3.960 | 3555 | Milling | 15.091 |
-| `05_large_stress` | FEASIBLE | 60 | 155 | 503 | 3658 | 7.621 | 19985 | Milling | 20.140 |
+The OR-Tools file is the main model.
 
-Important interpretation:
+### Input Data
 
-- The first three scenarios are proven optimal.
-- The fourth and fifth scenarios are feasible but not proven optimal within the time limit.
-- `FEASIBLE` means the solver found a valid schedule, but it did not prove that this schedule is the absolute best possible.
-- The large stress case is no longer `UNKNOWN`; the current Excel file shows it is `FEASIBLE`.
-- As the model becomes larger and more constrained, solver time increases and proving optimality becomes harder.
+The code defines:
 
-## 8. Condition-Based Maintenance Results
+- machines
+- products
+- cycle times
+- original orders
+- generated stress-test orders
+- shift length
+- maintenance threshold
+- maintenance duration
 
-The condition-based maintenance results are saved in separate Excel sheets.
-The key current results are:
+The shift is:
 
-| Scenario | Maintenance Triggers | Reserved Maintenance Minutes | Maximum Daily Machine Usage |
+```text
+480 minutes = 8 hours
+```
+
+The maintenance threshold is:
+
+```text
+180 minutes
+```
+
+The maintenance duration is:
+
+```text
+30 minutes
+```
+
+### Scenarios
+
+The OR-Tools file runs five scenarios:
+
+| Scenario | Meaning |
+|---|---|
+| `01_same_case` | Small original case |
+| `02_more_products_batches` | More products and batches |
+| `03_due_dates` | Adds due dates |
+| `04_realistic_constraints` | Adds due dates, planned maintenance, condition maintenance, operator limit |
+| `05_large_stress` | Largest stress test |
+
+### Important Functions
+
+| Function | What It Does |
+|---|---|
+| `generate_orders()` | Creates larger random order sets |
+| `get_orders()` | Chooses original or generated orders |
+| `build_operations()` | Converts orders into operations |
+| `create_due_dates()` | Creates due dates |
+| `maintenance_windows()` | Creates fixed planned maintenance windows |
+| `calculate_bottleneck()` | Finds the machine with highest load |
+| `solve_scenario()` | Builds and solves the optimization model |
+| `create_ortools_gantt()` | Creates the Gantt chart |
+| `create_kpi_dashboard()` | Creates KPI summary dashboard |
+| `create_bottleneck_bar_chart()` | Creates bottleneck bar chart |
+| `main()` | Runs everything and exports results |
+
+### OR-Tools Modeling
+
+OR-Tools uses interval variables:
+
+```text
+operation = start + duration + end
+```
+
+It uses `AddNoOverlap` so two operations cannot use the same machine at the same time.
+
+It uses Boolean variables to decide:
+
+- which day an operation belongs to
+- whether maintenance is required
+- whether operation sequencing is feasible
+
+It uses `AddCumulative` for the operator capacity constraint.
+
+## 6. What Happens in the PuLP Code
+
+The PuLP file solves two cases:
+
+| Scenario | Meaning |
+|---|---|
+| `same_case` | Original small case |
+| `maintenance_stress_case` | Larger quantity case where maintenance activates |
+
+PuLP does not have interval variables like OR-Tools.
+
+So the code uses a MILP formulation with:
+
+- integer start variables
+- integer end variables
+- binary ordering variables
+- big-M constraints
+
+The main idea is:
+
+```text
+operation i before operation j
+or
+operation j before operation i
+```
+
+This is how PuLP prevents overlap.
+
+The nonlinear maintenance rule is represented with binary variables and big-M constraints.
+
+## 7. What Happens in the Pyomo Code
+
+The Pyomo file solves the same two cases as PuLP:
+
+| Scenario | Meaning |
+|---|---|
+| `same_case` | Original small case |
+| `maintenance_stress_case` | Larger quantity case where maintenance activates |
+
+Pyomo also uses a MILP model.
+
+It uses:
+
+- variables for start and end times
+- binary variables for operation order
+- binary variables for day assignment
+- binary variables for maintenance triggers
+- CBC as the solver backend
+
+Pyomo is more mathematical in style than PuLP, but the model idea is very similar.
+
+## 8. OR-Tools Results
+
+The current OR-Tools Excel results are:
+
+| Scenario | Status | Orders | Batches | Operations | Makespan min | Makespan days | Tardiness min | Bottleneck | Bottleneck % | Solver time sec |
+|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| `01_same_case` | OPTIMAL | 4 | 4 | 12 | 168 | 0.350 | 0 | Painting | 83.33 | 0.079 |
+| `02_more_products_batches` | OPTIMAL | 15 | 30 | 95 | 462 | 0.963 | 0 | Milling | 100.00 | 0.239 |
+| `03_due_dates` | OPTIMAL | 25 | 54 | 176 | 1012 | 2.108 | 1005 | Milling | 99.21 | 0.736 |
+| `04_realistic_constraints` | FEASIBLE | 35 | 90 | 285 | 1900 | 3.958 | 3665 | Milling | 70.58 | 15.075 |
+| `05_large_stress` | FEASIBLE | 60 | 155 | 503 | 3586 | 7.471 | 16247 | Milling | 73.54 | 20.194 |
+
+### Interpretation
+
+The first three scenarios are `OPTIMAL`.
+
+This means the solver proved that the solution is the best possible.
+
+The fourth and fifth scenarios are `FEASIBLE`.
+
+This means the solver found a valid schedule, but it did not prove it is the best possible within the time limit.
+
+As the model becomes larger, the solver needs more time and proving optimality becomes harder.
+
+## 9. OR-Tools Maintenance Results
+
+Condition-based maintenance results:
+
+| Scenario | Maintenance Triggers | Reserved Maintenance min | Max Daily Usage min |
 |---|---:|---:|---:|
 | `01_same_case` | 0 | 0 | 140 |
-| `04_realistic_constraints` | 15 | 450 | 449 |
-| `05_large_stress` | 31 | 930 | 407 |
+| `04_realistic_constraints` | 18 | 540 | 449 |
+| `05_large_stress` | 31 | 930 | 450 |
 
-In the same-case scenario, no machine crosses the 180-minute threshold.
-Therefore, condition-based maintenance is not triggered.
+### Interpretation
 
-In the realistic scenario, maintenance is triggered 15 times.
-That reserves:
+In `01_same_case`, maintenance does not activate because the maximum daily usage is only 140 minutes.
 
-```text
-15 triggers x 30 minutes = 450 maintenance minutes
-```
-
-In the large stress scenario, maintenance is triggered 31 times.
-That reserves:
+In `04_realistic_constraints`, maintenance activates 18 times:
 
 ```text
-31 triggers x 30 minutes = 930 maintenance minutes
+18 x 30 = 540 minutes reserved for maintenance
 ```
 
-This is the clearest result of adding the nonlinear maintenance logic:
-the larger and more loaded the factory becomes, the more often machines enter maintenance, and the less production capacity remains available.
-
-## 9. Maintenance Trigger Breakdown
-
-For the realistic OR-Tools stress case:
-
-| Machine | Total Usage min | Triggered Days | Reserved Maintenance min | Max Daily Usage |
-|---|---:|---:|---:|---:|
-| Cutting | 937 | 3 | 90 | 310 |
-| Drilling | 625 | 1 | 30 | 200 |
-| Inspection | 419 | 1 | 30 | 195 |
-| Milling | 1341 | 3 | 90 | 449 |
-| Painting | 1094 | 3 | 90 | 368 |
-| Welding | 1272 | 4 | 120 | 401 |
-
-For the large OR-Tools stress case:
-
-| Machine | Total Usage min | Triggered Days | Reserved Maintenance min | Max Daily Usage |
-|---|---:|---:|---:|---:|
-| Cutting | 2254 | 7 | 210 | 407 |
-| Drilling | 1462 | 4 | 120 | 309 |
-| Inspection | 628 | 0 | 0 | 146 |
-| Milling | 2637 | 8 | 240 | 405 |
-| Painting | 1933 | 7 | 210 | 351 |
-| Welding | 1768 | 5 | 150 | 399 |
-
-Milling has the highest total usage in the large stress case.
-This agrees with the bottleneck result, where Milling becomes the bottleneck machine.
-
-## 10. Bottleneck Analysis
-
-Bottleneck analysis is calculated from the total processing load on each machine:
+In `05_large_stress`, maintenance activates 31 times:
 
 ```text
-machine utilization = total machine processing time / makespan
+31 x 30 = 930 minutes reserved for maintenance
 ```
 
-The bottleneck is the machine with the highest utilization.
+This shows that the nonlinear maintenance rule becomes important when the production system is more loaded.
 
-Current OR-Tools results:
+## 10. Bottleneck Results
 
-| Scenario | Bottleneck Machine | Utilization |
-|---|---|---:|
-| `01_same_case` | Painting | 83.33% |
-| `02_more_products_batches` | Milling | 100.00% |
-| `03_due_dates` | Milling | 99.21% |
-| `04_realistic_constraints` | Milling | 70.54% |
-| `05_large_stress` | Milling | 72.09% |
+The current bottleneck results are:
 
-The bottleneck changes from Painting in the small case to Milling in the scaled cases.
-This means that after adding more products and batches, Milling becomes the machine that limits production flow.
+| Scenario | Bottleneck Machine | Machine Load min | Makespan min | Utilization % |
+|---|---|---:|---:|---:|
+| `01_same_case` | Painting | 140 | 168 | 83.33 |
+| `02_more_products_batches` | Milling | 462 | 462 | 100.00 |
+| `03_due_dates` | Milling | 1004 | 1012 | 99.21 |
+| `04_realistic_constraints` | Milling | 1341 | 1900 | 70.58 |
+| `05_large_stress` | Milling | 2637 | 3586 | 73.54 |
 
-## 11. OR-Tools vs PuLP vs Pyomo Comparison
+### Interpretation
 
-The original same case was solved with all three approaches.
+Painting is the bottleneck only in the small original case.
 
-| Solver | Status | Operations | Makespan min | Tardiness min | Maintenance Triggers | Binary Variables | Solver Time sec | Formulation |
-|---|---|---:|---:|---:|---:|---:|---:|---|
-| OR-Tools CP-SAT | OPTIMAL | 12 | 168 | 0 | 0 | Uses Boolean scheduling logic | 0.049 | Interval variables and no-overlap |
-| PuLP CBC | Optimal | 12 | 168 | 0 | 0 | 116 | 0.274 | Big-M MILP |
-| Pyomo CBC | optimal | 12 | 168 | 0 | 0 | 116 | 0.440 | Big-M MILP |
+After scaling up, Milling becomes the bottleneck.
 
-All three solvers return the same makespan of 168 minutes for the same-case model.
-This confirms that the three formulations are consistent on the small test case.
-However, the same-case model still does not activate condition-based maintenance because the maximum daily usage is only 140 minutes.
+This means Milling is the machine that most limits the production schedule in larger scenarios.
 
-To make the nonlinear maintenance rule active in PuLP and Pyomo, a second scenario was added:
+Industrial recommendation:
 
 ```text
-maintenance_stress_case
+If the company wants to reduce makespan, Milling should be improved first.
 ```
 
-This case keeps the same maintenance threshold of 180 minutes, but uses larger quantities so machines become heavily loaded.
+Possible actions:
 
-| Solver | Scenario | Status | Operations | Makespan min | Tardiness min | Max Daily Usage | Maintenance Triggers | Reserved Maintenance min | Binary Variables | Solver Time sec |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| PuLP CBC | `maintenance_stress_case` | Optimal | 12 | 680 | 0 | 376 | 6 | 180 | 116 | 0.577 |
-| Pyomo CBC | `maintenance_stress_case` | optimal | 12 | 680 | 0 | 376 | 6 | 180 | 116 | 0.471 |
+- add overtime on Milling
+- add another milling machine
+- outsource some milling operations
+- reduce setup or downtime on Milling
 
-Now the condition-based maintenance rule is clearly active in both PuLP and Pyomo.
-Each model triggers maintenance 6 times:
+## 11. PuLP Results
+
+PuLP solves two scenarios:
+
+| Scenario | Status | Operations | Makespan min | Tardiness min | Maintenance Triggers | Reserved Maintenance min | Max Daily Usage | Binary Variables | Solver time sec |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `same_case` | Optimal | 12 | 168 | 0 | 0 | 0 | 140 | 116 | 0.288 |
+| `maintenance_stress_case` | Optimal | 12 | 680 | 0 | 6 | 180 | 376 | 116 | 0.429 |
+
+### Interpretation
+
+The same case matches OR-Tools:
+
+```text
+makespan = 168 minutes
+```
+
+The maintenance stress case activates maintenance:
 
 ```text
 6 triggers x 30 minutes = 180 reserved maintenance minutes
 ```
 
-This gives a fairer comparison because the nonlinear threshold constraint is not just present in the code; it actually affects the schedule.
+This proves the condition-based maintenance rule is active in PuLP.
 
-## 12. Solver Comparison
+## 12. Pyomo Results
 
-### OR-Tools CP-SAT
+Pyomo solves the same two scenarios:
 
-OR-Tools is the best fit for the full scheduling model.
-It supports interval variables and no-overlap constraints directly:
+| Scenario | Status | Operations | Makespan min | Tardiness min | Maintenance Triggers | Reserved Maintenance min | Max Daily Usage | Binary Variables | Solver time sec |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `same_case` | optimal | 12 | 168 | 0 | 0 | 0 | 140 | 116 | 0.266 |
+| `maintenance_stress_case` | optimal | 12 | 680 | 0 | 6 | 180 | 376 | 116 | 0.313 |
 
-```python
-interval = model.NewIntervalVar(start, duration, end, name)
-model.AddNoOverlap(machine_intervals[machine])
-```
+### Interpretation
 
-This makes the code closer to the real scheduling problem.
-It is also easier to scale the model with shifts, machine capacity, maintenance windows, and operator capacity.
+Pyomo gives the same result as PuLP because both models solve the same MILP formulation.
 
-### PuLP CBC
+This is a good result because it validates that the model was written consistently.
 
-PuLP can solve the same small open shop problem, but it uses a MILP formulation.
-Because PuLP does not have interval variables, machine conflicts are modeled with binary ordering variables:
+## 13. Solver Comparison
+
+### Same Case
+
+| Solver | Makespan min | Maintenance Triggers | Result |
+|---|---:|---:|---|
+| OR-Tools CP-SAT | 168 | 0 | Correct baseline |
+| PuLP CBC | 168 | 0 | Matches OR-Tools |
+| Pyomo CBC | 168 | 0 | Matches OR-Tools |
+
+The same case proves the three models are consistent.
+
+### Maintenance Stress Case
+
+| Solver | Makespan min | Maintenance Triggers | Reserved Maintenance min |
+|---|---:|---:|---:|
+| PuLP CBC | 680 | 6 | 180 |
+| Pyomo CBC | 680 | 6 | 180 |
+
+This proves that the maintenance threshold rule works in both MILP libraries.
+
+### Main Difference
+
+| Solver | Strength |
+|---|---|
+| OR-Tools CP-SAT | Best for scheduling because it has interval variables and no-overlap constraints |
+| PuLP CBC | Simple and readable MILP modeling |
+| Pyomo CBC | More formal mathematical modeling |
+
+OR-Tools is the best main solver for this project.
+
+PuLP and Pyomo are useful for comparison and for explaining the MILP version of the same problem.
+
+## 14. Visualization Results
+
+The OR-Tools code now creates three HTML visual outputs.
+
+### Gantt Chart
+
+File:
 
 ```text
-operation i before operation j OR operation j before operation i
+results/charts/gantt_04_realistic_constraints.html
 ```
 
-This requires big-M constraints.
-The model is understandable, but the number of binary variables grows quickly when more operations are added.
+This chart shows:
 
-### Pyomo CBC
+- machines on the y-axis
+- production time on the x-axis
+- colored bars for operations
+- different colors for product IDs
+- patterns for machine styles
+- gray blocks for planned maintenance
+- red markers for condition-based maintenance
+- black dashed line for makespan
 
-Pyomo is more general than PuLP and is useful for mathematical optimization models.
-It can represent MILP models clearly and can also support nonlinear optimization if a nonlinear solver is used.
-In this project, the Pyomo file uses CBC as the MILP solver backend.
-For this scheduling problem, Pyomo still needs the same big-M logic as PuLP because the model is written as a MILP.
+The red condition-based maintenance markers represent reserved capacity. They are not exact maintenance start times.
 
-## 13. Which Solver Is Better for This Project?
+### KPI Dashboard
 
-For this project, OR-Tools is the best main solver.
+File:
 
-Reasons:
+```text
+results/charts/kpi_summary_ortools.html
+```
 
-1. It has native scheduling constraints.
-2. It handles no-overlap constraints directly.
-3. It is easier to model machine calendars, maintenance windows, and operator capacity.
-4. It can still find feasible schedules for the large stress case within the time limit.
+This dashboard summarizes:
 
-PuLP and Pyomo are useful for comparison because they show how the same problem can be expressed as a mathematical programming model.
-However, they are less natural for open shop scheduling because they need many binary variables and big-M constraints.
+- status
+- orders
+- batches
+- operations
+- makespan
+- tardiness
+- bottleneck machine
+- bottleneck utilization
+- maintenance triggers
+- reserved maintenance time
+- solver time
 
-## 14. Code Explanation by File
+### Bottleneck Bar Chart
 
-### `01_ortools_stress_model.py`
+File:
 
-Main sections:
+```text
+results/charts/bottleneck_04_realistic_constraints.html
+```
 
-| Section / Function | Purpose |
-|---|---|
-| Input data and constants | Defines products, machines, shift length, maintenance threshold, and stress scenarios |
-| `generate_orders()` | Creates larger random order sets for stress testing |
-| `get_orders()` | Uses original orders or generated stress-test orders |
-| `build_operations()` | Converts orders into machine operations and durations |
-| `create_due_dates()` | Adds due dates for scenarios that use tardiness |
-| `maintenance_windows()` | Creates fixed planned maintenance windows |
-| `solve_scenario()` | Builds and solves the CP-SAT model for one scenario |
-| `calculate_bottleneck()` | Calculates machine load and bottleneck utilization |
-| `main()` | Runs all scenarios and writes the Excel workbook |
+This chart highlights the bottleneck machine.
 
-The most important OR-Tools modeling objects are:
+The red bar is the bottleneck.
 
-| Object | Meaning |
-|---|---|
-| Start variable | When an operation begins |
-| End variable | When an operation finishes |
-| Interval variable | The full operation block: start, duration, end |
-| `AddNoOverlap` | Prevents two operations from using the same machine at the same time |
-| `AddCumulative` | Limits the number of operators used at one time |
-| Boolean day variables | Choose which day an operation is assigned to |
-| Maintenance trigger variables | Decide whether condition-based maintenance is required |
+For the realistic scenario, the bottleneck is:
 
-### `02_pulp_same_case.py`
-
-Main sections:
-
-| Section / Function | Purpose |
-|---|---|
-| Input data and constants | Defines the same original case and maintenance threshold |
-| `build_operations()` | Builds operations from orders and product-machine times |
-| `add_no_overlap()` | Adds pairwise big-M constraints for machine and batch conflicts |
-| `add_maintenance_constraints()` | Adds fixed maintenance and condition-based maintenance logic |
-| `calculate_bottleneck()` | Calculates machine utilization |
-| `main()` | Solves the model and writes the Excel workbook |
-
-PuLP solves the same problem as a MILP.
-The main difference is that it must create binary ordering variables for operation pairs.
-
-### `03_pyomo_same_case.py`
-
-Main sections:
-
-| Section / Function | Purpose |
-|---|---|
-| Input data and constants | Defines the same original case and maintenance threshold |
-| `build_operations()` | Builds operations from orders and product-machine times |
-| `pairwise_keys()` and `create_pairs()` | Create operation pairs that may conflict |
-| `maintenance_keys()` | Creates machine-day keys for maintenance triggers |
-| `calculate_bottleneck()` | Calculates machine utilization |
-| `main()` | Builds the Pyomo model, solves it, and writes the Excel workbook |
-
-Pyomo also uses a MILP formulation with big-M constraints.
-Its syntax is more mathematical than PuLP, but the scheduling logic is similar.
+```text
+Milling
+```
 
 ## 15. Final Conclusion
 
-The project successfully scales the original open shop scheduling model and compares three optimization libraries.
-
-The most important result is that condition-based maintenance makes the model more realistic and more difficult.
-In the small same-case, no machine crosses the maintenance threshold, so the makespan remains 168 minutes for OR-Tools, PuLP, and Pyomo.
-In the larger OR-Tools stress tests, the maintenance rule has a strong effect:
-15 triggers in the realistic case and 31 triggers in the large stress case.
-
-The current results show that OR-Tools CP-SAT is the most suitable solver for this project because it directly supports scheduling constraints and can handle the larger stress scenarios.
-PuLP and Pyomo are useful for explaining the equivalent MILP approach, but they are less convenient for full-scale open shop scheduling.
-
-## 16. Additional Report: Nonlinear Maintenance in PuLP and Pyomo
-
-The condition-based maintenance rule was also added to the PuLP and Pyomo models.
-This makes the comparison stronger because all three libraries now include the same nonlinear industrial idea:
-
-```text
-If daily machine usage is greater than 180 minutes,
-then 30 minutes must be reserved for maintenance.
-```
-
-In real industry, this is a nonlinear or threshold-based rule because the maintenance time suddenly changes when the machine passes a usage limit.
-The relationship is not a smooth linear equation:
-
-```text
-daily usage <= 180 minutes -> maintenance = 0 minutes
-daily usage > 180 minutes  -> maintenance = 30 minutes
-```
-
-However, PuLP and Pyomo solve this project as MILP models.
-MILP solvers need the rule to be written with linear constraints.
-Therefore, the nonlinear maintenance rule is converted into a linear form using a binary variable.
-
-### Maintenance Variable
-
-For each machine and day, the model creates a binary variable:
-
-```text
-maintenance_required[machine, day]
-```
-
-This variable means:
-
-```text
-0 -> maintenance is not required
-1 -> maintenance is required
-```
-
-The model also calculates:
-
-```text
-daily_usage[machine, day]
-```
-
-This is the total processing time assigned to that machine on that day.
-
-### Linearized Maintenance Constraints
-
-The nonlinear condition is represented using big-M constraints:
-
-```text
-daily_usage <= 180 + M x maintenance_required
-daily_usage >= 181 - M x (1 - maintenance_required)
-daily_usage + 30 x maintenance_required <= 480
-```
-
-The meaning is:
-
-| Constraint | Meaning |
-|---|---|
-| `daily_usage <= 180 + M x maintenance_required` | If maintenance is not required, usage must stay at or below 180 minutes |
-| `daily_usage >= 181 - M x (1 - maintenance_required)` | If maintenance is required, usage must be above 180 minutes |
-| `daily_usage + 30 x maintenance_required <= 480` | If maintenance is required, 30 minutes are reserved inside the shift |
-
-This is how a nonlinear industrial rule becomes solvable in PuLP and Pyomo.
-The original rule is nonlinear, but the optimization model uses a linearized version.
-
-### PuLP Implementation
-
-In PuLP, the model creates a variable for daily usage and a binary variable for the maintenance decision:
-
-```python
-daily_usage = pulp.LpVariable(...)
-maintenance_required = pulp.LpVariable(..., cat="Binary")
-```
-
-Then it links daily usage to the operations assigned to that machine and day.
-Finally, it adds the big-M constraints shown above.
-
-The PuLP output workbook includes two condition-maintenance sheets:
-
-```text
-Condition_same_case
-Condition_maint_stress
-```
-
-This sheet shows, for each machine and day:
-
-- daily usage
-- maintenance threshold
-- whether maintenance was triggered
-- reserved maintenance time
-
-### Pyomo Implementation
-
-In Pyomo, the same logic is modeled with Pyomo variables and constraints.
-The maintenance trigger is also binary:
-
-```python
-model.condition_maintenance[machine, day]
-```
-
-The daily usage is calculated from the operations assigned to each machine-day.
-Then Pyomo applies the same linearized threshold constraints:
-
-```text
-daily_usage <= 180 + M x maintenance_required
-daily_usage >= 181 - M x (1 - maintenance_required)
-daily_usage + 30 x maintenance_required <= 480
-```
-
-The Pyomo output workbook also includes two condition-maintenance sheets:
-
-```text
-Condition_same_case
-Condition_maint_stress
-```
-
-This allows direct comparison with the PuLP output.
-
-### PuLP and Pyomo Maintenance Results
-
-The PuLP and Pyomo files now solve two scenarios:
-
-| Scenario | Purpose |
-|---|---|
-| `same_case` | Keeps the original small project case for solver consistency |
-| `maintenance_stress_case` | Uses larger quantities so the 180-minute maintenance threshold activates |
-
-In the original same-case result, maintenance still does not trigger:
-
-| Solver | Scenario | Max Daily Usage | Threshold | Maintenance Triggers | Reserved Maintenance |
-|---|---|---:|---:|---:|---:|
-| PuLP CBC | `same_case` | 140 | 180 | 0 | 0 |
-| Pyomo CBC | `same_case` | 140 | 180 | 0 | 0 |
-
-This is expected because the same-case schedule is too small to cross the threshold.
-The important comparison is the new maintenance stress case:
-
-| Solver | Scenario | Max Daily Usage | Threshold | Maintenance Triggers | Reserved Maintenance |
-|---|---|---:|---:|---:|---:|
-| PuLP CBC | `maintenance_stress_case` | 376 | 180 | 6 | 180 |
-| Pyomo CBC | `maintenance_stress_case` | 376 | 180 | 6 | 180 |
-
-Now the condition-based maintenance rule is active.
-Both PuLP and Pyomo reserve:
-
-```text
-6 triggered machine-days x 30 minutes = 180 maintenance minutes
-```
-
-Triggered machine-days in the PuLP maintenance stress result:
-
-| Machine | Day | Daily Usage min | Maintenance Reserved |
-|---|---:|---:|---:|
-| Cutting | 1 | 290 | 30 |
-| Cutting | 2 | 200 | 30 |
-| Drilling | 1 | 210 | 30 |
-| Milling | 1 | 210 | 30 |
-| Welding | 1 | 224 | 30 |
-| Painting | 1 | 376 | 30 |
-
-Triggered machine-days in the Pyomo maintenance stress result:
-
-| Machine | Day | Daily Usage min | Maintenance Reserved |
-|---|---:|---:|---:|
-| Cutting | 1 | 290 | 30 |
-| Cutting | 2 | 200 | 30 |
-| Drilling | 1 | 248 | 30 |
-| Milling | 1 | 210 | 30 |
-| Welding | 1 | 224 | 30 |
-| Painting | 1 | 376 | 30 |
-
-The schedules are not identical at every machine-day because MILP solvers can choose different but equally optimal arrangements.
-However, the important comparison is the same:
-
-- both solve the stress case optimally,
-- both reach a makespan of 680 minutes,
-- both trigger maintenance 6 times,
-- both reserve 180 minutes for maintenance.
-
-### Comparison with OR-Tools
-
-The same maintenance idea is modeled differently in the three solvers:
-
-| Solver | How Maintenance Is Modeled | Practical Effect |
-|---|---|---|
-| OR-Tools CP-SAT | Boolean variables with reified constraints inside a scheduling model | Best for stress testing because it also has interval variables and no-overlap constraints |
-| PuLP CBC | Binary variables and big-M linear constraints | Works for the small case, but becomes larger quickly |
-| Pyomo CBC | Binary variables and big-M linear constraints | Clear mathematical formulation, but still not as direct for scheduling |
-
-The main difference is that OR-Tools is a scheduling solver, while PuLP and Pyomo are general mathematical programming tools.
-OR-Tools can represent operations as intervals, but PuLP and Pyomo must represent conflicts using many binary ordering decisions.
-
-### What Changed After Adding Nonlinear Maintenance?
-
-After adding the nonlinear maintenance rule, the model became more realistic because it now checks machine workload before deciding available capacity.
-The model no longer assumes that all 480 shift minutes are always available for production.
-If a machine becomes heavily loaded, the model must reserve maintenance time.
-
-In PuLP and Pyomo, this adds extra binary variables.
-For the same-case model, there are 5 machines and 5 planning days:
-
-```text
-5 machines x 5 days = 25 maintenance trigger variables
-```
-
-This is why PuLP and Pyomo report 116 binary variables in both the same-case and the maintenance-stress case.
-The maintenance rule increases model complexity because the solver must check the threshold for every machine-day.
-
-In the current PuLP and Pyomo results:
-
-| Scenario | Makespan min | Maintenance Triggers | Reserved Maintenance Minutes | Interpretation |
-|---|---:|---:|---:|---|
-| `same_case` | 168 | 0 | 0 | Rule exists but does not activate |
-| `maintenance_stress_case` | 680 | 6 | 180 | Rule activates and reserves capacity |
-
-In larger cases, the effect becomes even stronger.
-The OR-Tools stress test shows this clearly:
-
-| Scenario | Maintenance Triggers | Reserved Maintenance Minutes |
-|---|---:|---:|
-| `04_realistic_constraints` | 15 | 450 |
-| `05_large_stress` | 31 | 930 |
-
-This means the nonlinear maintenance rule does not always change a small schedule, but it becomes important when the production system is stressed with more orders, more batches, and higher machine utilization.
+The project successfully builds and compares an open shop scheduling model using OR-Tools, PuLP, and Pyomo.
+
+The main findings are:
+
+1. OR-Tools is the strongest solver for the main scheduling model.
+2. PuLP and Pyomo validate the same-case result using MILP.
+3. The nonlinear maintenance rule is included as a threshold-based rule.
+4. The maintenance rule activates in the stress cases.
+5. Milling becomes the main bottleneck after scaling the production system.
+6. Larger scenarios become harder to prove optimal, so solver status changes from `OPTIMAL` to `FEASIBLE`.
+7. The Gantt chart, KPI dashboard, and bottleneck chart make the results easier to explain.
+
+Overall, the project is now not only an optimization model, but also a small production planning analysis system.

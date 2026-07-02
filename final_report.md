@@ -400,7 +400,72 @@ OR-Tools is the best main solver for this project.
 
 PuLP and Pyomo are useful for comparison and for explaining the MILP version of the same problem.
 
-## 14. Visualization Results
+## 14. How PuLP and Pyomo Solve the Nonlinear Maintenance Constraint
+
+The maintenance rule is nonlinear in real industrial logic because it is conditional:
+
+```text
+If daily machine usage > 180 minutes,
+then maintenance is required.
+```
+
+The solver cannot use a normal Python `if` statement for this because `daily_usage` is not known before solving. It is a decision value created by the optimization model.
+
+So PuLP and Pyomo solve this by introducing a binary variable:
+
+```text
+maintenance_required = 0 or 1
+```
+
+The meaning is:
+
+```text
+maintenance_required = 0 -> machine does not need maintenance that day
+maintenance_required = 1 -> machine needs maintenance that day
+```
+
+Then the nonlinear condition is rewritten as linear big-M constraints:
+
+```text
+daily_usage <= 180 + M x maintenance_required
+daily_usage >= 181 - M x (1 - maintenance_required)
+daily_usage + 30 x maintenance_required <= 480
+```
+
+This works as follows:
+
+| Case | What Happens |
+|---|---|
+| `maintenance_required = 0` | Daily usage must stay at or below 180 minutes |
+| `maintenance_required = 1` | Daily usage must be at least 181 minutes |
+| `maintenance_required = 1` | 30 minutes are reserved for maintenance |
+
+In PuLP, the binary variable is created using:
+
+```python
+maintenance_required = pulp.LpVariable(
+    f"condition_maintenance_{machine}_day_{day + 1}",
+    cat="Binary",
+)
+```
+
+In Pyomo, the same idea is created using:
+
+```python
+model.condition_maintenance = Var(condition_maintenance_keys, within=Binary)
+```
+
+So the important point is:
+
+```text
+The real maintenance rule is nonlinear/conditional,
+but PuLP and Pyomo solve it by converting it into a MILP model
+using binary variables and big-M constraints.
+```
+
+This is why the model can still be solved by linear MILP solvers such as CBC.
+
+## 15. Visualization Results
 
 The OR-Tools code now creates three HTML visual outputs.
 
@@ -465,7 +530,7 @@ For the realistic scenario, the bottleneck is:
 Milling
 ```
 
-## 15. Final Conclusion
+## 16. Final Conclusion
 
 The project successfully builds and compares an open shop scheduling model using OR-Tools, PuLP, and Pyomo.
 
